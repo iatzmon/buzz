@@ -35,10 +35,7 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
-use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_WORKFLOW_APPROVAL_REQUESTED,
-};
+use buzz_core::kind::{KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION};
 use nostr::EventId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -424,8 +421,10 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             continue;
         }
 
-        // Ignore non-message kinds (relay housekeeping, etc.).
-        if kind_u32 != KIND_STREAM_MESSAGE && kind_u32 != KIND_WORKFLOW_APPROVAL_REQUESTED {
+        // Avoid doing the asynchronous author gate for kinds no configured
+        // setup rule could match. The final `match_event` call below remains
+        // authoritative for channel, kind, mention, and expression checks.
+        if !setup_kind_allowed(kind_u32, &rules) {
             continue;
         }
 
@@ -574,7 +573,7 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
     let kinds = config
         .kinds_override
         .clone()
-        .unwrap_or_else(|| vec![KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED]);
+        .unwrap_or_else(crate::config::default_mention_kinds);
 
     match &config.subscribe_mode {
         // Config mode: load the actual rules, but they will be filtered by
@@ -590,6 +589,17 @@ fn build_setup_subscription_rules(config: &Config) -> Vec<filter::SubscriptionRu
         },
         _ => vec![mentions_rule(kinds)],
     }
+}
+
+/// Return whether any setup rule could match an event kind.
+///
+/// This is only a cheap prefilter before the asynchronous author gate. The
+/// complete rule match still runs after authorization, so a rule that matches
+/// the kind but not the channel or mention cannot produce a nudge.
+fn setup_kind_allowed(kind: u32, rules: &[filter::SubscriptionRule]) -> bool {
+    rules
+        .iter()
+        .any(|rule| rule.kinds.is_empty() || rule.kinds.contains(&kind))
 }
 
 fn mentions_rule(kinds: Vec<u32>) -> filter::SubscriptionRule {
@@ -701,6 +711,35 @@ async fn publish_setup_nudge(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_mentions_default_accepts_forum_post_and_comment_kinds() {
+        let rules = vec![mentions_rule(crate::config::default_mention_kinds())];
+
+        assert!(setup_kind_allowed(buzz_core::kind::KIND_FORUM_POST, &rules));
+        assert!(setup_kind_allowed(
+            buzz_core::kind::KIND_FORUM_COMMENT,
+            &rules
+        ));
+    }
+
+    #[test]
+    fn setup_kind_prefilter_preserves_explicit_kinds() {
+        let rules = vec![mentions_rule(vec![buzz_core::kind::KIND_STREAM_MESSAGE])];
+
+        assert!(setup_kind_allowed(
+            buzz_core::kind::KIND_STREAM_MESSAGE,
+            &rules
+        ));
+        assert!(!setup_kind_allowed(
+            buzz_core::kind::KIND_FORUM_POST,
+            &rules
+        ));
+        assert!(!setup_kind_allowed(
+            buzz_core::kind::KIND_FORUM_COMMENT,
+            &rules
+        ));
+    }
 
     #[test]
     fn setup_payload_from_raw_returns_none_when_absent() {
