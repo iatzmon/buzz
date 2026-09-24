@@ -164,6 +164,137 @@ void main() {
     },
   );
 
+  test('overlapping policy pages honor each policy cursor window', () async {
+    final overlapChannel = '22345678-1234-4abc-8def-123456789012';
+    final channelPolicy = BuzzPushSubscription(
+      filter: BuzzPushFilter(kinds: [9], hTags: [overlapChannel]),
+      notificationClass: 'default',
+    );
+    final authorPolicy = BuzzPushSubscription(
+      filter: BuzzPushFilter(kinds: [9], authors: [sender.public]),
+      notificationClass: 'default',
+    );
+    final overlappingCommunity = community.copyWith(
+      relayUrl: 'ws://127.0.0.1',
+      pushSubscriptionState: BuzzPushLeaseSubscriptionState.accepted(
+        desired: [channelPolicy, authorPolicy],
+        acceptedSubscriptions: [channelPolicy, authorPolicy],
+        acceptedGeneration: 1,
+      ),
+    );
+    final older = NostrEvent.fromJson(
+      nostr.Event.from(
+        kind: 9,
+        content: 'older channel event',
+        tags: [
+          ['h', overlapChannel],
+        ],
+        secretKey: sender.secret,
+        createdAt: now - 10,
+      ).toMap(),
+    );
+    final newer = [
+      for (var index = 0; index < 64; index++)
+        NostrEvent.fromJson(
+          nostr.Event.from(
+            kind: 9,
+            content: 'newer overlapping event $index',
+            tags: [
+              ['h', overlapChannel],
+            ],
+            secretKey: sender.secret,
+            createdAt: now + 10,
+          ).toMap(),
+        ),
+    ];
+    final allEvents = [older, ...newer];
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    final sockets = <WebSocket>[];
+    var queryCount = 0;
+    addTearDown(() async {
+      for (final socket in sockets) {
+        await socket.close();
+      }
+      await server.close(force: true);
+    });
+    server.listen((request) async {
+      final socket = await WebSocketTransformer.upgrade(request);
+      sockets.add(socket);
+      socket.add(jsonEncode(['AUTH', 'overlap-challenge']));
+      socket.listen((raw) {
+        final frame = jsonDecode(raw as String) as List<dynamic>;
+        if (frame[0] == 'AUTH') {
+          final auth = nostr.Event.fromJson(jsonEncode(frame[1]));
+          socket.add(jsonEncode(['OK', auth.id, true, '']));
+          return;
+        }
+        if (frame[0] != 'REQ') return;
+        queryCount++;
+        final seen = <String>{};
+        for (final rawFilter in frame.skip(2)) {
+          final filter = Map<String, dynamic>.from(rawFilter as Map);
+          final kinds = (filter['kinds'] as List).cast<int>();
+          final authors = (filter['authors'] as List?)?.cast<String>();
+          final channels = (filter['#h'] as List?)?.cast<String>();
+          final since = filter['since'] as int;
+          final until = filter['until'] as int?;
+          final beforeId = filter['before_id'] as String?;
+          final candidates =
+              allEvents
+                  .where(
+                    (event) =>
+                        kinds.contains(event.kind) &&
+                        (authors == null || authors.contains(event.pubkey)) &&
+                        (channels == null ||
+                            event.tags.any(
+                              (tag) =>
+                                  tag.length >= 2 &&
+                                  tag[0] == 'h' &&
+                                  channels.contains(tag[1]),
+                            )) &&
+                        event.createdAt >= since &&
+                        (until == null ||
+                            event.createdAt < until ||
+                            (event.createdAt == until &&
+                                (beforeId == null ||
+                                    event.id.compareTo(beforeId) > 0))),
+                  )
+                  .toList()
+                ..sort((a, b) {
+                  final byTime = b.createdAt.compareTo(a.createdAt);
+                  return byTime == 0 ? a.id.compareTo(b.id) : byTime;
+                });
+          for (final event in candidates.take(filter['limit'] as int)) {
+            if (seen.add(event.id)) {
+              socket.add(jsonEncode(['EVENT', frame[1], event.toJson()]));
+            }
+          }
+        }
+        socket.add(jsonEncode(['EOSE', frame[1]]));
+      });
+    });
+
+    final result = await fetchAndroidPushEvents(
+      overlappingCommunity.copyWith(relayUrl: 'ws://127.0.0.1:${server.port}'),
+      now - 60,
+      continuation: [
+        AndroidPushFetchContinuation(
+          policyIndex: 0,
+          until: now,
+          beforeId: 'f' * 64,
+        ),
+        const AndroidPushFetchContinuation(
+          policyIndex: 1,
+          until: null,
+          beforeId: null,
+        ),
+      ],
+    );
+    expect(result.complete, isTrue);
+    expect(result.events.map((event) => event.id).toSet(), hasLength(65));
+    expect(queryCount, 2);
+  });
+
   test(
     'production fetch authenticates then reads a bounded subscription',
     () async {
@@ -467,6 +598,7 @@ void main() {
       final valid = event();
       final shown = <Map<String, String>>[];
       List<AndroidPushFetchContinuation>? resumed;
+      int? resumedSince;
       await expectLater(
         deliverAndroidBuzzWake(
           storage: storage,
@@ -509,13 +641,15 @@ void main() {
 
       await deliverAndroidBuzzWake(
         storage: storage,
-        clock: () => now,
-        fetch: (_, _, continuation) async {
+        clock: () => now + 7200,
+        fetch: (_, since, continuation) async {
+          resumedSince = since;
           resumed = continuation;
           return AndroidPushFetchResult.completed(const []);
         },
         present: (_) async => true,
       );
+      expect(resumedSince, now - 60);
       expect(resumed, hasLength(2));
       expect(resumed!.first.until, now);
       expect(resumed!.first.beforeId, 'a' * 64);

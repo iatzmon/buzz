@@ -292,10 +292,13 @@ fn classify_response(status: reqwest::StatusCode, body: &[u8]) -> DeliveryResult
     let invalid_token = error.as_ref().is_some_and(|error| {
         error.details.as_ref().is_some_and(|details| {
             details.iter().any(|detail| {
-                detail.detail_type.as_deref()
+                (detail.detail_type.as_deref()
                     == Some("type.googleapis.com/google.firebase.fcm.v1.FcmError")
-                    && (detail.error_code.as_deref() == Some("UNREGISTERED")
-                        || detail.field_violations.as_ref().is_some_and(|violations| {
+                    && detail.error_code.as_deref() == Some("UNREGISTERED"))
+                    || (status == reqwest::StatusCode::BAD_REQUEST
+                        && detail.detail_type.as_deref()
+                            == Some("type.googleapis.com/google.rpc.BadRequest")
+                        && detail.field_violations.as_ref().is_some_and(|violations| {
                             violations.iter().any(|violation| {
                                 violation.field.as_deref() == Some("message.token")
                             })
@@ -372,6 +375,38 @@ mod tests {
                 invalid.to_string().as_bytes()
             ),
             DeliveryResult::InvalidEndpoint
+        );
+        let token_field_violation = serde_json::json!({
+            "error": {
+                "status": "INVALID_ARGUMENT",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": [{"field": "message.token"}]
+                }]
+            }
+        });
+        assert_eq!(
+            classify_response(
+                reqwest::StatusCode::BAD_REQUEST,
+                token_field_violation.to_string().as_bytes()
+            ),
+            DeliveryResult::InvalidEndpoint
+        );
+        let non_token_field_violation = serde_json::json!({
+            "error": {
+                "status": "INVALID_ARGUMENT",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.BadRequest",
+                    "fieldViolations": [{"field": "message.notification.title"}]
+                }]
+            }
+        });
+        assert_eq!(
+            classify_response(
+                reqwest::StatusCode::BAD_REQUEST,
+                non_token_field_violation.to_string().as_bytes()
+            ),
+            DeliveryResult::Failed
         );
         assert_eq!(
             classify_response(reqwest::StatusCode::FORBIDDEN, b"{}"),

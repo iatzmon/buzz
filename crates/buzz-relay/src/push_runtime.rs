@@ -18,6 +18,7 @@ use crate::{handlers::push_lease::Subscription, push_fcm, state::AppState};
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
 const MAX_ATTEMPTS: i32 = 8;
+const APNS_APP_PROFILE: &str = "buzz-ios-dogfood";
 /// Upper bound on one claimed matcher batch. Bounded well under
 /// `get_events_by_ids`' 500-id batch-fetch contract.
 const MATCH_BATCH_LIMIT: i64 = 64;
@@ -37,6 +38,26 @@ struct DeliveryRequest<'a> {
     endpoint_grant: &'a str,
     request_id: uuid::Uuid,
     expires_at: i64,
+}
+
+enum ConfiguredTransport<'a> {
+    Fcm(&'a push_fcm::FcmClient),
+    Apns(&'a url::Url),
+    Unsupported,
+}
+
+fn configured_transport<'a>(
+    app_profile: &str,
+    fcm: Option<&'a push_fcm::FcmClient>,
+    apns: Option<&'a url::Url>,
+) -> ConfiguredTransport<'a> {
+    if app_profile == push_fcm::APP_PROFILE {
+        return fcm.map_or(ConfiguredTransport::Unsupported, ConfiguredTransport::Fcm);
+    }
+    if app_profile == APNS_APP_PROFILE {
+        return apns.map_or(ConfiguredTransport::Unsupported, ConfiguredTransport::Apns);
+    }
+    ConfiguredTransport::Unsupported
 }
 
 #[derive(Deserialize)]
@@ -493,59 +514,67 @@ async fn deliver_one(
         record_delivery("suppressed");
         return;
     }
-    if outcome.app_profile == push_fcm::APP_PROFILE {
-        let protected = if let Some(fcm) = fcm {
-            serving_write
+    let url = match configured_transport(
+        &outcome.app_profile,
+        fcm,
+        state.config.push_gateway_delivery_url.as_ref(),
+    ) {
+        ConfiguredTransport::Fcm(fcm) => {
+            let protected = serving_write
                 .protect(fcm.deliver(http, &outcome.endpoint_grant))
-                .await
-        } else {
-            // A withdrawn or unreadable deployment credential must not turn a
-            // provider configuration failure into endpoint revocation.
-            Ok(push_fcm::DeliveryResult::Retry)
-        };
-        match protected {
-            Ok(push_fcm::DeliveryResult::Accepted) => {
-                let _ = state
-                    .db
-                    .complete_push_wake(outcome.community, outcome.id, outcome.claim_id)
-                    .await;
-                record_delivery("accepted");
+                .await;
+            match protected {
+                Ok(push_fcm::DeliveryResult::Accepted) => {
+                    let _ = state
+                        .db
+                        .complete_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                        .await;
+                    record_delivery("accepted");
+                }
+                Ok(push_fcm::DeliveryResult::InvalidEndpoint) => {
+                    let _ = state
+                        .db
+                        .disable_push_endpoint(
+                            outcome.community,
+                            &outcome.author,
+                            &outcome.installation_id,
+                            outcome.lease_generation,
+                        )
+                        .await;
+                    let _ = state
+                        .db
+                        .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                        .await;
+                    record_delivery("invalid_endpoint");
+                }
+                Ok(push_fcm::DeliveryResult::Retry) => {
+                    record_delivery(retry_or_fail(state, &outcome, 2).await);
+                }
+                Ok(push_fcm::DeliveryResult::Failed) | Err(_) => {
+                    let _ = state
+                        .db
+                        .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                        .await;
+                    record_delivery("failed");
+                }
             }
-            Ok(push_fcm::DeliveryResult::InvalidEndpoint) => {
-                let _ = state
-                    .db
-                    .disable_push_endpoint(
-                        outcome.community,
-                        &outcome.author,
-                        &outcome.installation_id,
-                        outcome.lease_generation,
-                    )
-                    .await;
-                let _ = state
-                    .db
-                    .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
-                    .await;
-                record_delivery("invalid_endpoint");
+            if let Err(error) = serving_write.finish().await {
+                warn!(wake=%outcome.id, %error, "failed to release community serving lease after FCM delivery");
             }
-            Ok(push_fcm::DeliveryResult::Retry) => {
-                record_delivery(retry_or_fail(state, &outcome, 2).await);
-            }
-            Ok(push_fcm::DeliveryResult::Failed) | Err(_) => {
-                let _ = state
-                    .db
-                    .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
-                    .await;
-                record_delivery("failed");
-            }
+            return;
         }
-        if let Err(error) = serving_write.finish().await {
-            warn!(wake=%outcome.id, %error, "failed to release community serving lease after FCM delivery");
+        ConfiguredTransport::Apns(url) => url,
+        ConfiguredTransport::Unsupported => {
+            let _ = state
+                .db
+                .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                .await;
+            record_delivery("configuration_error");
+            if let Err(error) = serving_write.finish().await {
+                warn!(wake=%outcome.id, %error, "failed to release community serving lease after unsupported push transport");
+            }
+            return;
         }
-        return;
-    }
-    let Some(url) = state.config.push_gateway_delivery_url.as_ref() else {
-        record_delivery("configuration_error");
-        return;
     };
     let body = match delivery_body(&outcome.endpoint_grant, outcome.id, outcome.expires_at) {
         Ok(body) => body,
@@ -746,6 +775,24 @@ mod tests {
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
+
+    #[test]
+    fn transport_routing_rejects_removed_or_unknown_profiles() {
+        assert!(matches!(
+            configured_transport(APNS_APP_PROFILE, None, None),
+            ConfiguredTransport::Unsupported
+        ));
+        assert!(matches!(
+            configured_transport("unknown-profile", None, None),
+            ConfiguredTransport::Unsupported
+        ));
+
+        let gateway = url::Url::parse("https://push.example/v1/deliveries/apns").unwrap();
+        assert!(matches!(
+            configured_transport(APNS_APP_PROFILE, None, Some(&gateway)),
+            ConfiguredTransport::Apns(url) if url == &gateway
+        ));
+    }
 
     #[test]
     fn gift_wrap_match_requires_self_p_filter_and_recipient() {

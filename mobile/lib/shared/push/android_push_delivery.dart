@@ -218,7 +218,8 @@ Future<AndroidPushFetchResult> fetchAndroidPushEvents(
               page.events
                   .where(
                     (event) =>
-                        androidPushFilterMatches(policy.policy.filter, event),
+                        androidPushFilterMatches(policy.policy.filter, event) &&
+                        _androidPushEventInPolicyWindow(event, policy, since),
                   )
                   .toList()
                 ..sort(_newestPushEventFirst);
@@ -274,6 +275,16 @@ Future<AndroidPushFetchResult> fetchAndroidPushEvents(
   );
 }
 
+class _AndroidPushContinuationState {
+  final int since;
+  final List<AndroidPushFetchContinuation> continuation;
+
+  const _AndroidPushContinuationState({
+    required this.since,
+    required this.continuation,
+  });
+}
+
 Map<String, dynamic> _pushCatchUpFilter(
   _AndroidPushPolicyCursor policy,
   int since,
@@ -303,6 +314,19 @@ NostrEvent _oldestPushEvent(List<NostrEvent> events) {
     }
   }
   return oldest;
+}
+
+bool _androidPushEventInPolicyWindow(
+  NostrEvent event,
+  _AndroidPushPolicyCursor policy,
+  int since,
+) {
+  if (event.createdAt < since) return false;
+  final until = policy.until;
+  final beforeId = policy.beforeId;
+  if (until == null || beforeId == null) return true;
+  return event.createdAt < until ||
+      (event.createdAt == until && event.id.compareTo(beforeId) > 0);
 }
 
 int _newestPushEventFirst(NostrEvent a, NostrEvent b) {
@@ -440,17 +464,18 @@ class _AndroidPushRelayReader {
 String _androidPushContinuationKey(String communityId) =>
     '$_androidPushContinuationKeyPrefix$communityId';
 
-Future<List<AndroidPushFetchContinuation>?> _loadAndroidPushContinuation(
+Future<_AndroidPushContinuationState?> _loadAndroidPushContinuation(
   SharedPreferences prefs, {
   required Community community,
-  required int since,
+  required int minimumSince,
 }) async {
   final raw = prefs.getString(_androidPushContinuationKey(community.id));
   if (raw == null) return null;
   try {
     final decoded = jsonDecode(raw);
     if (decoded is! Map ||
-        decoded['since'] != since ||
+        decoded['since'] is! int ||
+        decoded['since'] < minimumSince ||
         decoded['fingerprint'] !=
             buzzPushSubscriptionsFingerprint(
               community.pushSubscriptionState.desired,
@@ -458,10 +483,13 @@ Future<List<AndroidPushFetchContinuation>?> _loadAndroidPushContinuation(
         decoded['continuation'] is! List) {
       throw const FormatException('Stale Android push continuation.');
     }
-    return [
-      for (final value in decoded['continuation'] as List)
-        _androidPushContinuationFromJson(value),
-    ];
+    return _AndroidPushContinuationState(
+      since: decoded['since'] as int,
+      continuation: [
+        for (final value in decoded['continuation'] as List)
+          _androidPushContinuationFromJson(value),
+      ],
+    );
   } on Object {
     await prefs.remove(_androidPushContinuationKey(community.id));
     return null;
@@ -495,12 +523,12 @@ AndroidPushFetchContinuation _androidPushContinuationFromJson(Object? value) {
 Future<void> _saveAndroidPushContinuation(
   SharedPreferences prefs, {
   required Community community,
-  required int since,
+  required int sessionSince,
   required AndroidPushFetchResult result,
 }) => prefs.setString(
   _androidPushContinuationKey(community.id),
   jsonEncode({
-    'since': since,
+    'since': sessionSince,
     'fingerprint': buzzPushSubscriptionsFingerprint(
       community.pushSubscriptionState.desired,
     ),
@@ -554,13 +582,17 @@ Future<void> deliverAndroidBuzzWake({
         try {
           final enabledSince =
               prefs.getInt('buzz.android.push.since.${community.id}') ?? now;
-          final since = enabledSince > now - 3600 ? enabledSince : now - 3600;
+          final presentationSince = enabledSince > now - 3600
+              ? enabledSince
+              : now - 3600;
+          final savedContinuation = await _loadAndroidPushContinuation(
+            prefs,
+            community: community,
+            minimumSince: enabledSince,
+          );
+          final sessionSince = savedContinuation?.since ?? presentationSince;
           final continuation =
-              await _loadAndroidPushContinuation(
-                prefs,
-                community: community,
-                since: since,
-              ) ??
+              savedContinuation?.continuation ??
               const <AndroidPushFetchContinuation>[];
           final result =
               await (fetch ??
@@ -568,14 +600,14 @@ Future<void> deliverAndroidBuzzWake({
                     c,
                     s,
                     continuation: cursors,
-                  ))(community, since, continuation);
+                  ))(community, sessionSince, continuation);
           for (final event in result.events) {
             // Re-read both policy and read state after I/O; opt-out/removal wins.
             final current = (await communities.loadAll())
                 .where((c) => c.id == community.id)
                 .firstOrNull;
             if (current == null) break;
-            if (event.createdAt < since) continue;
+            if (event.createdAt < presentationSince) continue;
             await prefs.reload();
             if (!shouldPresentAndroidPush(
               community: current,
@@ -606,7 +638,7 @@ Future<void> deliverAndroidBuzzWake({
             await _saveAndroidPushContinuation(
               prefs,
               community: community,
-              since: since,
+              sessionSince: sessionSince,
               result: result,
             );
             throw StateError('Android push catch-up remains pending');
