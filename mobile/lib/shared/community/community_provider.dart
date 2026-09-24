@@ -8,6 +8,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../auth/auth_provider.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
+import '../push/android_push_registration.dart';
 import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/signed_event_relay.dart';
@@ -130,12 +131,21 @@ Future<void> _deactivateCommunityPushLease(
   }
   final decoded = nostr.Nip19.decode(payload: nsec);
   final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
-  final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
+  final descriptor = await fetchBuzzPushLeaseDescriptor(
+    canonicalBuzzPushRelayHttpUrl(community.relayUrl),
+    appProfile: isAndroidPushBuild
+        ? buzzAndroidPushAppProfile
+        : buzzDevPushAppProfile,
+    expectedTransport: isAndroidPushBuild
+        ? buzzAndroidPushTransport
+        : buzzPushTransport,
+  );
   final matchingGrant = (await readBuzzPushEndpointGrants())
       .where(
         (grant) =>
             grant.relayOrigin == descriptor.origin &&
-            grant.appProfile == buzzDevPushAppProfile,
+            (grant.appProfile == buzzDevPushAppProfile ||
+                grant.appProfile == buzzAndroidPushAppProfile),
       )
       .firstOrNull;
   if (matchingGrant == null) {

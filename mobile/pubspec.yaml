@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  buzz_android_push:
+    path: packages/buzz_android_push
   cupertino_icons: ^1.0.8
   # Grapheme-cluster segmentation, for deciding whether a message body is
   # nothing but emoji. Already present transitively via the Flutter SDK;
@@ -18,6 +20,8 @@ dependencies:
   flutter_hooks: ^0.21.3
   lucide_icons_flutter: ^3.1.0
   http: ^1.4.0
+  firebase_core: ^4.15.0
+  firebase_messaging: ^16.7.0
   flutter_secure_storage: ^10.0.0
   flutter_svg: ^2.2.4
   mobile_scanner: ^7.0.0
@@ -50,6 +54,10 @@ dependencies:
   local_auth: ^3.0.2
 
 dev_dependencies:
+  integration_test:
+    sdk: flutter
+  flutter_driver:
+    sdk: flutter
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0

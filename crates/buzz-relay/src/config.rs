@@ -346,12 +346,16 @@ pub struct Config {
     pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
-    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
-    /// Required while push is enabled. An explicitly empty setting is allowed
-    /// only while push is disabled.
+    /// Exact HTTPS gateway endpoint used to submit client-authorized APNs
+    /// delivery capabilities. Optional when the private Android FCM profile
+    /// is the only configured transport.
     pub push_gateway_delivery_url: Option<url::Url>,
     /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
+    /// Initialized private Android FCM transport. The relay loads and validates
+    /// the service account during startup when push is enabled, before the
+    /// profile can be advertised or accepted.
+    pub android_fcm_client: Option<std::sync::Arc<crate::push_fcm::FcmClient>>,
 
     /// Optional relay-hosted policy shown on join surfaces. Disabled when no
     /// documents or age attestation are configured.
@@ -969,26 +973,47 @@ impl Config {
             ));
         }
         let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
-            Ok(raw) if raw.trim().is_empty() && push_enabled => {
-                return Err(ConfigError::InvalidValue(
-                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must not be empty when BUZZ_PUSH_ENABLED=true"
-                        .to_string(),
-                ));
-            }
             Ok(raw) if raw.trim().is_empty() => None,
             Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
-            Err(std::env::VarError::NotPresent) if push_enabled => {
-                return Err(ConfigError::InvalidValue(
-                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be configured when BUZZ_PUSH_ENABLED=true"
-                        .to_string(),
-                ));
-            }
             Err(std::env::VarError::NotPresent) => None,
             Err(error) => {
                 return Err(ConfigError::InvalidValue(format!(
                     "BUZZ_PUSH_GATEWAY_DELIVERY_URL must be valid UTF-8: {error}"
                 )));
             }
+        };
+        let android_fcm_service_account_file =
+            match std::env::var("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE") {
+                Ok(raw) if raw.trim().is_empty() => None,
+                Ok(raw) => Some(std::path::PathBuf::from(raw.trim())),
+                Err(std::env::VarError::NotPresent) => None,
+                Err(error) => {
+                    return Err(ConfigError::InvalidValue(format!(
+                        "BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE must be valid UTF-8: {error}"
+                    )));
+                }
+            };
+        if push_enabled
+            && push_gateway_delivery_url.is_none()
+            && android_fcm_service_account_file.is_none()
+        {
+            return Err(ConfigError::InvalidValue(
+                "BUZZ_PUSH_GATEWAY_DELIVERY_URL or BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE must be configured when BUZZ_PUSH_ENABLED=true"
+                    .to_string(),
+            ));
+        }
+        let android_fcm_client = if push_enabled {
+            android_fcm_service_account_file
+                .as_deref()
+                .map(crate::push_fcm::FcmClient::from_file)
+                .transpose()
+                .map_err(|error| {
+                    ConfigError::InvalidValue(format!(
+                        "BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE is unusable: {error}"
+                    ))
+                })?
+        } else {
+            None
         };
         let push_gateway_timeout_millis = match std::env::var("BUZZ_PUSH_GATEWAY_TIMEOUT_MS") {
             Ok(raw) => raw
@@ -1261,6 +1286,7 @@ impl Config {
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            android_fcm_client,
             join_policy,
             admin,
             web_dir,
@@ -1272,6 +1298,33 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_FCM_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+MIIBVQIBADANBgkqhkiG9w0BAQEFAASCAT8wggE7AgEAAkEAtrpz2vOAk9aVw5mw\n\
+EX0NjRONNzzd3NPQotHxrR4/KQIDwTeDmWgHgk+qa04imUWXQMCgWvU0Oewo4IQY\n\
+7foH3QIDAQABAkBu6dYQ/OT617GoPM1mkCV9kHSTJtr0g42MhyrPDiEAXjVmRvv+\n\
+z19vqPS5up7ZC5CSlVOZ2fai6T7KEuwvEfUBAiEA6P3LA88Hw31UIUIxq970yL3q\n\
+v97I1zV7zFu+aXaYCy0CIQDIxfhC5nA8nLNuXz/7wy5UC2h2DIWhyw/LNjlAJZ0d\n\
+cQIhANrJ6KiM8zdqK2SH6mkBF1CitxyyMluVh8lhpa8XhLOJAiAqv4wmom4PWcYS\n\
+oBE9h8dbebpaODxTwKqyN+9kqx2S4QIhAImYbgITI4wV0jwoGhC0FVEG6w4Rnpft\n\
+6yRbJi0MVio/\n\
+-----END PRIVATE KEY-----\n";
+
+    fn valid_fcm_service_account() -> tempfile::NamedTempFile {
+        let mut file = tempfile::NamedTempFile::new().expect("create FCM fixture");
+        serde_json::to_writer(
+            file.as_file_mut(),
+            &serde_json::json!({
+                "project_id": "buzz-test",
+                "client_email": "buzz-test@example.invalid",
+                "private_key": TEST_FCM_PRIVATE_KEY,
+                "token_uri": "https://oauth2.googleapis.com/token"
+            }),
+        )
+        .expect("write FCM fixture");
+        file.as_file_mut().sync_all().expect("flush FCM fixture");
+        file
+    }
 
     #[test]
     fn klipy_config_debug_redacts_the_api_key() {
@@ -2182,12 +2235,18 @@ mod tests {
     }
 
     #[test]
-    fn push_is_opt_in_and_gateway_is_required_when_enabled() {
+    fn push_is_opt_in_and_requires_one_configured_transport_when_enabled() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let valid_fcm = valid_fcm_service_account();
+        let malformed_fcm = tempfile::NamedTempFile::new().expect("create malformed FCM fixture");
+        let missing_fcm_dir = tempfile::tempdir().expect("create missing FCM fixture directory");
+        let missing_fcm = missing_fcm_dir.path().join("missing-service-account.json");
         let previous_enabled = std::env::var_os("BUZZ_PUSH_ENABLED");
         let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        let previous_fcm = std::env::var_os("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE");
         std::env::remove_var("BUZZ_PUSH_ENABLED");
         std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::remove_var("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE");
         let config = Config::from_env().expect("default config");
         assert!(!config.push_enabled);
         assert!(config.push_gateway_delivery_url.is_none());
@@ -2219,12 +2278,36 @@ mod tests {
         assert!(matches!(
             result,
             Err(ConfigError::InvalidValue(ref message))
-                if message.contains("must not be empty")
+                if message.contains("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE")
+        ));
+
+        std::env::set_var("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE", valid_fcm.path());
+        let config = Config::from_env().expect("FCM-only push config");
+        assert!(config.android_fcm_client.is_some());
+
+        std::env::set_var(
+            "BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE",
+            malformed_fcm.path(),
+        );
+        let result = Config::from_env();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("invalid Android FCM service-account JSON")
+        ));
+
+        std::env::set_var("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE", &missing_fcm);
+        let result = Config::from_env();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("unable to read Android FCM service-account file")
         ));
 
         std::env::set_var("BUZZ_PUSH_ENABLED", "false");
         let config = Config::from_env().expect("disabled push config");
         assert!(config.push_gateway_delivery_url.is_none());
+        assert!(config.android_fcm_client.is_none());
 
         if let Some(value) = previous_enabled {
             std::env::set_var("BUZZ_PUSH_ENABLED", value);
@@ -2235,6 +2318,11 @@ mod tests {
             std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
         } else {
             std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        }
+        if let Some(value) = previous_fcm {
+            std::env::set_var("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE", value);
+        } else {
+            std::env::remove_var("BUZZ_ANDROID_FCM_SERVICE_ACCOUNT_FILE");
         }
     }
 

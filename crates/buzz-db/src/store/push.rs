@@ -102,7 +102,7 @@ pub struct LeaseVersion<'a> {
     pub expires_at: i64,
 }
 
-/// Effective fields for an active APNs lease.
+/// Effective fields for an active NIP-PL lease.
 #[derive(Debug, Clone, Copy)]
 pub struct ActiveLease<'a> {
     /// Application profile selected from the executor descriptor.
@@ -171,8 +171,10 @@ pub struct ClaimedWake {
     pub installation_id: String,
     /// Generation captured when the job was enqueued.
     pub lease_generation: i64,
-    /// Opaque endpoint capability for the stateless gateway.
+    /// Endpoint token or opaque gateway capability selected by the profile.
     pub endpoint_grant: String,
+    /// Application profile selected by the accepted lease.
+    pub app_profile: String,
     /// Wake class sent to the gateway.
     pub class: String,
     /// Delivery deadline, in Unix seconds.
@@ -1145,7 +1147,7 @@ pub async fn claim_due_wakes(
           AND l.endpoint_hash = o.endpoint_hash
         RETURNING o.community_id, o.id, o.claim_id, o.event_id, c.channel_id,
                   o.author, o.installation_id, o.lease_generation,
-                  l.endpoint_grant, o.class, o.expires_at, o.created_at AS queued_at,
+                  l.endpoint_grant, l.app_profile, o.class, o.expires_at, o.created_at AS queued_at,
                   o.attempts
         "#,
     )
@@ -1177,7 +1179,7 @@ pub async fn revalidate_wake_for_send(
         r#"
         SELECT o.community_id, o.id, o.claim_id, o.event_id, e.channel_id,
                o.author, o.installation_id, o.lease_generation,
-               l.endpoint_grant, o.class, o.expires_at, o.created_at AS queued_at,
+               l.endpoint_grant, l.app_profile, o.class, o.expires_at, o.created_at AS queued_at,
                o.attempts
         FROM push_wake_outbox o
         JOIN push_leases l
@@ -1354,6 +1356,7 @@ fn row_to_claimed_wake(row: sqlx::postgres::PgRow) -> Result<ClaimedWake> {
         installation_id: row.try_get("installation_id")?,
         lease_generation: row.try_get("lease_generation")?,
         endpoint_grant: row.try_get("endpoint_grant")?,
+        app_profile: row.try_get("app_profile")?,
         class: row.try_get("class")?,
         expires_at: row.try_get("expires_at")?,
         queued_at: row.try_get("queued_at")?,

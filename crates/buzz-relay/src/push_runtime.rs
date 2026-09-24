@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tracing::{error, warn};
 
-use crate::{handlers::push_lease::Subscription, state::AppState};
+use crate::{handlers::push_lease::Subscription, push_fcm, state::AppState};
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
@@ -340,6 +340,7 @@ fn push_filter_authorized_for_event(
 pub async fn run_delivery_worker(state: Arc<AppState>) {
     let http = match reqwest::Client::builder()
         .timeout(state.config.push_gateway_timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(http) => http,
@@ -349,6 +350,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
             return;
         }
     };
+    let fcm = state.config.android_fcm_client.clone();
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
@@ -361,7 +363,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
                         Ok(wakes) => {
                             for wake in wakes {
                                 found = true;
-                                deliver_one(&state, &http, wake).await;
+                                deliver_one(&state, &http, fcm.as_deref(), wake).await;
                             }
                         }
                         Err(e) => warn!(%community, "push wake claim failed: {e}"),
@@ -384,6 +386,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
 async fn deliver_one(
     state: &AppState,
     http: &reqwest::Client,
+    fcm: Option<&push_fcm::FcmClient>,
     claimed: buzz_db::push::ClaimedWake,
 ) {
     let outcome = match state
@@ -485,6 +488,61 @@ async fn deliver_one(
             return;
         }
     };
+    if let Err(error) = serving_write.verify().await {
+        warn!(wake=%outcome.id, %error, "push serving lease lost before delivery");
+        record_delivery("suppressed");
+        return;
+    }
+    if outcome.app_profile == push_fcm::APP_PROFILE {
+        let protected = if let Some(fcm) = fcm {
+            serving_write
+                .protect(fcm.deliver(http, &outcome.endpoint_grant))
+                .await
+        } else {
+            // A withdrawn or unreadable deployment credential must not turn a
+            // provider configuration failure into endpoint revocation.
+            Ok(push_fcm::DeliveryResult::Retry)
+        };
+        match protected {
+            Ok(push_fcm::DeliveryResult::Accepted) => {
+                let _ = state
+                    .db
+                    .complete_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                    .await;
+                record_delivery("accepted");
+            }
+            Ok(push_fcm::DeliveryResult::InvalidEndpoint) => {
+                let _ = state
+                    .db
+                    .disable_push_endpoint(
+                        outcome.community,
+                        &outcome.author,
+                        &outcome.installation_id,
+                        outcome.lease_generation,
+                    )
+                    .await;
+                let _ = state
+                    .db
+                    .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                    .await;
+                record_delivery("invalid_endpoint");
+            }
+            Ok(push_fcm::DeliveryResult::Retry) => {
+                record_delivery(retry_or_fail(state, &outcome, 2).await);
+            }
+            Ok(push_fcm::DeliveryResult::Failed) | Err(_) => {
+                let _ = state
+                    .db
+                    .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                    .await;
+                record_delivery("failed");
+            }
+        }
+        if let Err(error) = serving_write.finish().await {
+            warn!(wake=%outcome.id, %error, "failed to release community serving lease after FCM delivery");
+        }
+        return;
+    }
     let Some(url) = state.config.push_gateway_delivery_url.as_ref() else {
         record_delivery("configuration_error");
         return;
@@ -505,11 +563,6 @@ async fn deliver_one(
             return;
         }
     };
-    if let Err(error) = serving_write.verify().await {
-        warn!(wake=%outcome.id, %error, "push serving lease lost before delivery");
-        record_delivery("suppressed");
-        return;
-    }
     metrics::counter!("buzz_push_gateway_requests_total").increment(1);
     let gateway_started = Instant::now();
     let protected = serving_write

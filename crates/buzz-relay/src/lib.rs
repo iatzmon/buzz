@@ -35,6 +35,8 @@ pub mod metrics;
 pub mod nip11;
 /// NIP-01 client/relay message parsing.
 pub mod protocol;
+/// Private Android FCM HTTP v1 transport.
+pub mod push_fcm;
 /// Durable NIP-PL matcher and delivery worker.
 pub mod push_runtime;
 mod readiness;

@@ -1,0 +1,38 @@
+// Optional public Firebase Android configuration. Keep deployment configuration
+// outside the patch and supply its absolute path at build time.
+import groovy.json.JsonSlurper
+import java.util.Base64
+
+def enabled = (project.findProperty('dart-defines') ?: '').split(',').any {
+    try { return new String(Base64.decoder.decode(it), 'UTF-8') == 'BUZZ_ANDROID_FCM_ENABLED=true' }
+    catch (IllegalArgumentException ignored) { return false }
+}
+def configPath = System.getenv('BUZZ_ANDROID_FIREBASE_CONFIG')
+def firebase = null
+if (configPath) {
+    def configFile = new File(configPath)
+    if (!configFile.isAbsolute() || !configFile.isFile()) {
+        throw new GradleException('BUZZ_ANDROID_FIREBASE_CONFIG must name an absolute Firebase google-services.json file.')
+    }
+    firebase = new JsonSlurper().parse(configFile)
+}
+android.buildTypes.each { buildType ->
+    def packageId = android.defaultConfig.applicationId + (buildType.applicationIdSuffix ?: '')
+    def client = firebase?.client?.find { it.client_info?.android_client_info?.package_name == packageId }
+    def values = client ? [
+        google_app_id: client.client_info?.mobilesdk_app_id,
+        google_api_key: client.api_key?.find { it.current_key }?.current_key,
+        gcm_defaultSenderId: firebase.project_info?.project_number,
+        project_id: firebase.project_info?.project_id,
+    ] : [:]
+    if (enabled && values.size() == 4 && values.values().every { it instanceof String && !it.isBlank() }) {
+        values.each { key, value -> buildType.resValue('string', key, value) }
+    }
+    tasks.matching { it.name == "compileFlutterBuild${buildType.name.capitalize()}" }.configureEach {
+        doFirst {
+            if (enabled && (values.size() != 4 || !values.values().every { it instanceof String && !it.isBlank() })) {
+                throw new GradleException('Android push requires BUZZ_ANDROID_FIREBASE_CONFIG with a Firebase client matching ' + packageId)
+            }
+        }
+    }
+}

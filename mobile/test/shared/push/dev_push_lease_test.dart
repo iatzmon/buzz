@@ -20,6 +20,31 @@ void main() {
   final grant = _grant(relay.public);
   final now = DateTime.fromMillisecondsSinceEpoch(1752620000 * 1000);
 
+  test(
+    'Android profile is explicit and cannot silently use the Apple profile',
+    () {
+      final information = _descriptorJson(relay.public);
+      final push = information['push'] as Map<String, dynamic>;
+      push['app_profiles'] = [
+        {'id': buzzAndroidPushAppProfile, 'transport': 'fcm'},
+      ];
+      push['class_support'] = {
+        'fcm': ['default'],
+      };
+      expect(
+        () => BuzzPushLeaseDescriptor.fromRelayInformation(information),
+        throwsFormatException,
+      );
+      final android = BuzzPushLeaseDescriptor.fromRelayInformation(
+        information,
+        appProfile: buzzAndroidPushAppProfile,
+        expectedTransport: buzzAndroidPushTransport,
+      );
+      expect(android.appProfile, buzzAndroidPushAppProfile);
+      expect(android.transport, 'fcm');
+    },
+  );
+
   test('publishes strict kind-30350 lease and waits for accepted OK', () async {
     Map<String, dynamic>? submitted;
     final publication = await publishBuzzDevPushLease(

@@ -1,0 +1,19 @@
+name: buzz_android_push
+description: Native Android notification foundation for Buzz mobile.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.11.4
+  flutter: '>=3.41.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: xyz.block.buzz.androidpush
+        pluginClass: BuzzAndroidPushPlugin
