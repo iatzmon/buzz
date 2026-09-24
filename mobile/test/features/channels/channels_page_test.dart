@@ -16,6 +16,9 @@ import 'package:buzz/features/channels/channels_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
+import 'package:buzz/features/forum/forum_models.dart';
+import 'package:buzz/features/forum/forum_posts_view.dart';
+import 'package:buzz/features/forum/forum_provider.dart';
 import 'package:buzz/features/profile/profile_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -179,16 +182,17 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('general'), findsOneWidget);
-    expect(find.text('design-forum'), findsNothing);
+    expect(find.text('design-forum'), findsOneWidget);
     expect(find.text('Alice'), findsOneWidget);
     expect(find.text('Channels'), findsOneWidget);
-    expect(find.text('FORUMS'), findsNothing);
+    expect(find.text('Forums'), findsOneWidget);
     expect(find.text('DMs'), findsOneWidget);
     expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
     expect(find.byTooltip('Channels options'), findsOneWidget);
     expect(find.byIcon(LucideIcons.ellipsisVertical), findsWidgets);
     expect(find.byIcon(LucideIcons.arrowUpDown), findsNothing);
+    expect(find.byTooltip('Forums options'), findsOneWidget);
     expect(find.byTooltip('DMs options'), findsOneWidget);
 
     // DM identity display: the unnamed counterpart tile renders its
@@ -251,6 +255,28 @@ void main() {
     final sectionTitle = tester.widget<Text>(find.text('Channels'));
     expect(sectionTitle.style?.fontSize, contentListTitleTextStyle.fontSize);
     expect(sectionTitle.style?.fontWeight, FontWeight.w600);
+  });
+
+  testWidgets('opens the forum posts view when selecting a forum', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _FakeNotifier(testChannels)),
+          forumPostsProvider(
+            '2',
+          ).overrideWith((ref) async => const ForumPostsResponse(posts: [])),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('design-forum'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ForumPostsView), findsOneWidget);
+    expect(find.text('No posts yet'), findsOneWidget);
   });
 
   testWidgets('keys DM tile fallback avatars to the non-self counterpart', (
@@ -472,7 +498,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    final lastChannel = tester.getRect(find.text('general'));
+    final lastChannel = tester.getRect(find.text('design-forum'));
     final divider = tester.getRect(find.byType(Divider).last);
     final nextSectionHeader = tester.getRect(find.text('DMs'));
 
