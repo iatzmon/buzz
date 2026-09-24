@@ -236,19 +236,33 @@ pub async fn relay_info_handler(
 }
 
 fn push_descriptor(
-    push_configured: bool,
+    apns_configured: bool,
+    fcm_configured: bool,
     relay_url: &str,
     executor_key_id: &str,
     relay_keypair: &nostr::Keys,
     tenant_host: Option<&str>,
 ) -> Option<serde_json::Value> {
     let host = tenant_host?;
-    push_configured.then_some(())?;
+    (apns_configured || fcm_configured).then_some(())?;
     let scheme = if relay_url.starts_with("wss://") {
         "wss"
     } else {
         "ws"
     };
+    let mut app_profiles = Vec::new();
+    let mut class_support = serde_json::Map::new();
+    if apns_configured {
+        app_profiles.push(serde_json::json!({"id": "buzz-ios-dogfood", "transport": "apns"}));
+        class_support.insert("apns".to_string(), serde_json::json!(["default"]));
+    }
+    if fcm_configured {
+        app_profiles.push(serde_json::json!({"id": crate::push_fcm::APP_PROFILE, "transport": crate::push_fcm::TRANSPORT}));
+        class_support.insert(
+            crate::push_fcm::TRANSPORT.to_string(),
+            serde_json::json!(["default"]),
+        );
+    }
     Some(serde_json::json!({
         "origin": format!("{scheme}://{host}"),
         "keys": [{
@@ -256,10 +270,10 @@ fn push_descriptor(
             "pubkey": relay_keypair.public_key().to_hex(),
             "current": true
         }],
-        "app_profiles": [{"id": "buzz-ios-dogfood", "transport": "apns"}],
+        "app_profiles": app_profiles,
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
         "h_grammar": "uuid-v4-lowercase",
-        "class_support": {"apns": ["default"]},
+        "class_support": class_support,
         "limitation": {
             "max_lease_ttl": 2592000,
             "max_leases_per_pubkey": 16,
@@ -314,7 +328,8 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         None
     };
     if let Some(push) = push_descriptor(
-        state.config.push_enabled,
+        state.config.push_gateway_delivery_url.is_some(),
+        state.config.android_fcm_client.is_some(),
         &state.config.relay_url,
         &state.config.push_executor_key_id,
         &state.relay_keypair,
@@ -418,16 +433,53 @@ mod tests {
     #[test]
     fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
         let keys = nostr::Keys::generate();
-        assert!(
-            push_descriptor(false, "ws://relay", "key", &keys, Some("tenant.example")).is_none()
-        );
-        assert!(push_descriptor(true, "ws://relay", "key", &keys, None).is_none());
-        let descriptor = push_descriptor(true, "ws://relay", "key", &keys, Some("tenant.example"))
-            .expect("configured push descriptor");
+        assert!(push_descriptor(
+            false,
+            false,
+            "ws://relay",
+            "key",
+            &keys,
+            Some("tenant.example")
+        )
+        .is_none());
+        assert!(push_descriptor(true, false, "ws://relay", "key", &keys, None).is_none());
+        let descriptor = push_descriptor(
+            true,
+            false,
+            "ws://relay",
+            "key",
+            &keys,
+            Some("tenant.example"),
+        )
+        .expect("configured push descriptor");
         assert_eq!(descriptor["origin"], "ws://tenant.example");
         assert_eq!(
             descriptor["push_kinds"],
             serde_json::json!(crate::handlers::push_lease::PUSH_KINDS)
+        );
+    }
+
+    #[test]
+    fn android_fcm_profile_is_advertised_only_when_configured() {
+        let keys = nostr::Keys::generate();
+        let descriptor = push_descriptor(
+            false,
+            true,
+            "ws://relay",
+            "key",
+            &keys,
+            Some("tenant.example"),
+        )
+        .expect("configured FCM descriptor");
+        assert_eq!(
+            descriptor["app_profiles"],
+            serde_json::json!([
+                {"id": "buzz-android-fcm", "transport": "fcm"}
+            ])
+        );
+        assert_eq!(
+            descriptor["class_support"],
+            serde_json::json!({"fcm": ["default"]})
         );
     }
 

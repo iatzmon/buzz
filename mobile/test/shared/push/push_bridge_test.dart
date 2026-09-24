@@ -32,6 +32,48 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  test('Android reads actual permission and opens system settings', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    final calls = <String>[];
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_channel, (call) async {
+          calls.add(call.method);
+          return call.method == 'notificationAuthorizationStatus'
+              ? 'denied'
+              : true;
+        });
+    expect(
+      await readBuzzPushAuthorizationStatus(),
+      BuzzPushAuthorizationStatus.denied,
+    );
+    expect(await openBuzzPushNotificationSettings(), isTrue);
+    expect(calls, [
+      'notificationAuthorizationStatus',
+      'openNotificationSettings',
+    ]);
+  });
+
+  test(
+    'Android drains a cold notification into the deep-link pipeline',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(_channel, (call) async {
+            expect(call.method, 'takePendingNotificationResponse');
+            return {
+              'communityId': 'community',
+              'channelId': 'channel',
+              'eventId': 'event',
+            };
+          });
+      await syncPendingBuzzPushNotificationResponse();
+      final link = pendingPushNotificationLink.value!;
+      expect(link.communityId, 'community');
+      expect(link.channelId, 'channel');
+      expect(link.messageId, 'event');
+    },
+  );
+
   test('captures APNs token success and clears the previous error', () async {
     apnsRegistrationError.value = 'old error';
     await TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

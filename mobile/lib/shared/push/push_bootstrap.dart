@@ -10,6 +10,8 @@ import '../relay/relay_provider.dart';
 import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
 import 'dev_push_lease.dart';
+import 'android_push_bootstrap.dart';
+import 'android_push_registration.dart';
 import 'push_bridge.dart';
 import 'push_lease_revocation_outbox.dart';
 import 'push_relay_capability_provider.dart';
@@ -159,6 +161,7 @@ class BuzzPushBootstrap extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    if (isAndroidPushBuild) return AndroidBuzzPushBootstrap(child: child);
     useListenable(apnsDeviceToken);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);

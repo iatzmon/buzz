@@ -196,6 +196,8 @@ android {
     }
 }
 
+apply(from = rootProject.file("firebase-push.gradle"))
+
 dependencies {
     implementation("com.google.android.play:age-signals:0.0.4")
     implementation("androidx.appcompat:appcompat:1.6.1")

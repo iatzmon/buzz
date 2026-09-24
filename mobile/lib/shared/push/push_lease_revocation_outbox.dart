@@ -295,7 +295,8 @@ class BuzzPushLeaseRevocationOutbox {
         .where(
           (grant) =>
               grant.relayOrigin == relayOrigin &&
-              grant.appProfile == buzzDevPushAppProfile,
+              (grant.appProfile == buzzDevPushAppProfile ||
+                  grant.appProfile == buzzAndroidPushAppProfile),
         )
         .toList();
     if (matching.length != 1) {
@@ -511,7 +512,12 @@ Uri _buzzPushRelayUri(String relayUrl) {
 Future<void> publishBuzzPushLeaseRevocation(
   BuzzPushLeaseRevocationRecord record,
 ) async {
-  final descriptor = await fetchBuzzPushLeaseDescriptor(record.relayUrl);
+  final android = defaultTargetPlatform == TargetPlatform.android;
+  final descriptor = await fetchBuzzPushLeaseDescriptor(
+    record.relayUrl,
+    appProfile: android ? buzzAndroidPushAppProfile : buzzDevPushAppProfile,
+    expectedTransport: android ? buzzAndroidPushTransport : buzzPushTransport,
+  );
   if (descriptor.origin != record.relayOrigin) {
     throw StateError('Relay push origin changed while revocation was pending.');
   }

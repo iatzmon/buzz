@@ -13,11 +13,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tracing::{error, warn};
 
-use crate::{handlers::push_lease::Subscription, state::AppState};
+use crate::{handlers::push_lease::Subscription, push_fcm, state::AppState};
 
 const CLAIM_SECS: i64 = 30;
 const EVENT_USEFUL_SECS: i64 = 3600;
 const MAX_ATTEMPTS: i32 = 8;
+const APNS_APP_PROFILE: &str = "buzz-ios-dogfood";
 /// Upper bound on one claimed matcher batch. Bounded well under
 /// `get_events_by_ids`' 500-id batch-fetch contract.
 const MATCH_BATCH_LIMIT: i64 = 64;
@@ -37,6 +38,26 @@ struct DeliveryRequest<'a> {
     endpoint_grant: &'a str,
     request_id: uuid::Uuid,
     expires_at: i64,
+}
+
+enum ConfiguredTransport<'a> {
+    Fcm(&'a push_fcm::FcmClient),
+    Apns(&'a url::Url),
+    Unsupported,
+}
+
+fn configured_transport<'a>(
+    app_profile: &str,
+    fcm: Option<&'a push_fcm::FcmClient>,
+    apns: Option<&'a url::Url>,
+) -> ConfiguredTransport<'a> {
+    if app_profile == push_fcm::APP_PROFILE {
+        return fcm.map_or(ConfiguredTransport::Unsupported, ConfiguredTransport::Fcm);
+    }
+    if app_profile == APNS_APP_PROFILE {
+        return apns.map_or(ConfiguredTransport::Unsupported, ConfiguredTransport::Apns);
+    }
+    ConfiguredTransport::Unsupported
 }
 
 #[derive(Deserialize)]
@@ -340,6 +361,7 @@ fn push_filter_authorized_for_event(
 pub async fn run_delivery_worker(state: Arc<AppState>) {
     let http = match reqwest::Client::builder()
         .timeout(state.config.push_gateway_timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(http) => http,
@@ -349,6 +371,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
             return;
         }
     };
+    let fcm = state.config.android_fcm_client.clone();
     let mut idle_delay = Duration::from_millis(500);
     loop {
         let mut found = false;
@@ -361,7 +384,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
                         Ok(wakes) => {
                             for wake in wakes {
                                 found = true;
-                                deliver_one(&state, &http, wake).await;
+                                deliver_one(&state, &http, fcm.as_deref(), wake).await;
                             }
                         }
                         Err(e) => warn!(%community, "push wake claim failed: {e}"),
@@ -384,6 +407,7 @@ pub async fn run_delivery_worker(state: Arc<AppState>) {
 async fn deliver_one(
     state: &AppState,
     http: &reqwest::Client,
+    fcm: Option<&push_fcm::FcmClient>,
     claimed: buzz_db::push::ClaimedWake,
 ) {
     let outcome = match state
@@ -485,9 +509,72 @@ async fn deliver_one(
             return;
         }
     };
-    let Some(url) = state.config.push_gateway_delivery_url.as_ref() else {
-        record_delivery("configuration_error");
+    if let Err(error) = serving_write.verify().await {
+        warn!(wake=%outcome.id, %error, "push serving lease lost before delivery");
+        record_delivery("suppressed");
         return;
+    }
+    let url = match configured_transport(
+        &outcome.app_profile,
+        fcm,
+        state.config.push_gateway_delivery_url.as_ref(),
+    ) {
+        ConfiguredTransport::Fcm(fcm) => {
+            let protected = serving_write
+                .protect(fcm.deliver(http, &outcome.endpoint_grant))
+                .await;
+            match protected {
+                Ok(push_fcm::DeliveryResult::Accepted) => {
+                    let _ = state
+                        .db
+                        .complete_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                        .await;
+                    record_delivery("accepted");
+                }
+                Ok(push_fcm::DeliveryResult::InvalidEndpoint) => {
+                    let _ = state
+                        .db
+                        .disable_push_endpoint(
+                            outcome.community,
+                            &outcome.author,
+                            &outcome.installation_id,
+                            outcome.lease_generation,
+                        )
+                        .await;
+                    let _ = state
+                        .db
+                        .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                        .await;
+                    record_delivery("invalid_endpoint");
+                }
+                Ok(push_fcm::DeliveryResult::Retry) => {
+                    record_delivery(retry_or_fail(state, &outcome, 2).await);
+                }
+                Ok(push_fcm::DeliveryResult::Failed) | Err(_) => {
+                    let _ = state
+                        .db
+                        .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                        .await;
+                    record_delivery("failed");
+                }
+            }
+            if let Err(error) = serving_write.finish().await {
+                warn!(wake=%outcome.id, %error, "failed to release community serving lease after FCM delivery");
+            }
+            return;
+        }
+        ConfiguredTransport::Apns(url) => url,
+        ConfiguredTransport::Unsupported => {
+            let _ = state
+                .db
+                .fail_push_wake(outcome.community, outcome.id, outcome.claim_id)
+                .await;
+            record_delivery("configuration_error");
+            if let Err(error) = serving_write.finish().await {
+                warn!(wake=%outcome.id, %error, "failed to release community serving lease after unsupported push transport");
+            }
+            return;
+        }
     };
     let body = match delivery_body(&outcome.endpoint_grant, outcome.id, outcome.expires_at) {
         Ok(body) => body,
@@ -505,11 +592,6 @@ async fn deliver_one(
             return;
         }
     };
-    if let Err(error) = serving_write.verify().await {
-        warn!(wake=%outcome.id, %error, "push serving lease lost before delivery");
-        record_delivery("suppressed");
-        return;
-    }
     metrics::counter!("buzz_push_gateway_requests_total").increment(1);
     let gateway_started = Instant::now();
     let protected = serving_write
@@ -693,6 +775,24 @@ mod tests {
     use serde_json::Value;
     use std::{future::IntoFuture, sync::Arc};
     use tokio::sync::Mutex;
+
+    #[test]
+    fn transport_routing_rejects_removed_or_unknown_profiles() {
+        assert!(matches!(
+            configured_transport(APNS_APP_PROFILE, None, None),
+            ConfiguredTransport::Unsupported
+        ));
+        assert!(matches!(
+            configured_transport("unknown-profile", None, None),
+            ConfiguredTransport::Unsupported
+        ));
+
+        let gateway = url::Url::parse("https://push.example/v1/deliveries/apns").unwrap();
+        assert!(matches!(
+            configured_transport(APNS_APP_PROFILE, None, Some(&gateway)),
+            ConfiguredTransport::Apns(url) if url == &gateway
+        ));
+    }
 
     #[test]
     fn gift_wrap_match_requires_self_p_filter_and_recipient() {

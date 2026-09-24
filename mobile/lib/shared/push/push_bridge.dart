@@ -5,14 +5,21 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
 import '../relay/relay_provider.dart';
 import '../relay/app_lifecycle_provider.dart';
 import 'push_snapshot.dart';
+import 'android_push_registration.dart';
 
 const _channel = MethodChannel('buzz/push');
+
+bool get _hasNativeNotificationBridge =>
+    !kIsWeb &&
+    (defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android);
 
 enum BuzzPushAuthorizationStatus {
   notDetermined,
@@ -64,7 +71,7 @@ class BuzzPushAuthorizationStatusNotifier
 }
 
 Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) {
+  if (!_hasNativeNotificationBridge) {
     return BuzzPushAuthorizationStatus.authorized;
   }
   final raw = await _channel.invokeMethod<String>(
@@ -83,7 +90,7 @@ Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
 }
 
 Future<bool> openBuzzPushNotificationSettings() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
+  if (!_hasNativeNotificationBridge) return false;
   return await _channel.invokeMethod<bool>('openNotificationSettings') ?? false;
 }
 
@@ -124,7 +131,7 @@ MessageDeepLink? _pushNotificationLink(Object? arguments) {
 /// Pulls a notification response that arrived before the Flutter method
 /// handler was installed.
 Future<void> syncPendingBuzzPushNotificationResponse() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (!_hasNativeNotificationBridge) return;
   try {
     final arguments = await _channel.invokeMapMethod<dynamic, dynamic>(
       'takePendingNotificationResponse',
@@ -191,6 +198,7 @@ class BuzzPushEndpointGrant {
 }
 
 Future<List<BuzzPushEndpointGrant>> readBuzzPushEndpointGrants() async {
+  if (isAndroidPushBuild) return readAndroidPushEndpoints();
   if (!Env.pushGatewayConfigured ||
       defaultTargetPlatform != TargetPlatform.iOS) {
     return const [];
@@ -275,13 +283,17 @@ Future<void> registerBuzzPushCommunitySnapshotStrict(
 
 /// Restores notification presentation without reading community storage.
 Future<void> restoreAgeRestrictedBuzzNotifications() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (defaultTargetPlatform != TargetPlatform.iOS && !isAndroidPushBuild) {
+    return;
+  }
   await _channel.invokeMethod<void>('restoreAgeRestrictedNotifications');
 }
 
 /// Removes notifications rendered before a confirmed age restriction.
 Future<void> purgeAgeRestrictedBuzzNotifications() async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (defaultTargetPlatform != TargetPlatform.iOS && !isAndroidPushBuild) {
+    return;
+  }
   await _channel.invokeMethod<void>('purgeAgeRestrictedNotifications');
 }
 
@@ -290,8 +302,23 @@ Future<void> _registerBuzzPushCommunitySnapshot(
   required bool strict,
   bool settleFence = false,
 }) async {
-  if (defaultTargetPlatform != TargetPlatform.iOS) return;
+  if (defaultTargetPlatform != TargetPlatform.iOS && !isAndroidPushBuild) {
+    return;
+  }
   try {
+    if (isAndroidPushBuild) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.reload();
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      for (final community in communities) {
+        final key = 'buzz.android.push.since.${community.id}';
+        if (!community.pushNotificationsEnabled) {
+          await prefs.remove(key);
+        } else if (!prefs.containsKey(key)) {
+          await prefs.setInt(key, now);
+        }
+      }
+    }
     final snapshots = [
       for (final community in communities)
         if (community.pushNotificationsEnabled)
@@ -324,7 +351,8 @@ Future<void> _registerBuzzPushCommunitySnapshot(
       {
         'section': 'communities',
         'communities': [for (final snapshot in snapshots) snapshot.toJson()],
-        'signingKeys': signingKeys,
+        if (defaultTargetPlatform == TargetPlatform.iOS)
+          'signingKeys': signingKeys,
         if (strict) 'settleFence': settleFence,
       },
     );

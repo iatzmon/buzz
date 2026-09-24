@@ -6,6 +6,7 @@ import 'app.dart';
 import 'features/age_gate/age_signal_push_bootstrap.dart';
 import 'features/invites/invite_join_provider.dart';
 import 'shared/push/push_bridge.dart';
+import 'shared/push/android_push_registration.dart';
 import 'shared/theme/theme_provider.dart';
 
 void main() => runBuzzApp(const App());
@@ -13,6 +14,13 @@ void main() => runBuzzApp(const App());
 Future<void> runBuzzApp(Widget app) async {
   WidgetsFlutterBinding.ensureInitialized();
   installBuzzPushMethodHandler();
+  if (isAndroidPushBuild) {
+    try {
+      await initializeAndroidPush();
+    } catch (_) {
+      // Bootstrap retries initialization; saved accounts and UI remain usable.
+    }
+  }
   await syncPendingBuzzPushNotificationResponse();
 
   // Pre-load preferences so the first frame uses the saved theme/accent.

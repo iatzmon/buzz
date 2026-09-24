@@ -24,39 +24,51 @@ void main() {
     keys = nostr.Keys.generate();
   });
 
-  test('community removal journals one precise lease address', () async {
-    final outbox = _outbox(
-      storage: storage,
-      clock: clock,
-      scheduler: scheduler,
-      publisher: (_) async {},
-    );
-    final community =
-        Community.create(
-          name: 'Test',
-          relayUrl: 'wss://relay.example',
-          nsec: keys.nsec,
-        ).copyWith(
-          pubkey: keys.public,
-          pushNotificationsEnabled: true,
-          pushSubscriptionState: const BuzzPushLeaseSubscriptionState.desired()
-              .withReservedGeneration(4),
+  for (final profile in ['buzz-ios-dogfood', 'buzz-android-fcm']) {
+    test(
+      'community removal journals one precise $profile lease address',
+      () async {
+        final outbox = _outbox(
+          storage: storage,
+          clock: clock,
+          scheduler: scheduler,
+          publisher: (_) async {},
         );
-    final grant = _grant(expiresAt: clock.seconds + 3600);
+        final community =
+            Community.create(
+              name: 'Test',
+              relayUrl: 'wss://relay.example',
+              nsec: keys.nsec,
+            ).copyWith(
+              pubkey: keys.public,
+              pushNotificationsEnabled: true,
+              pushSubscriptionState:
+                  const BuzzPushLeaseSubscriptionState.desired()
+                      .withReservedGeneration(4),
+            );
+        final grant = _grant(expiresAt: clock.seconds + 3600, profile: profile);
 
-    await outbox.enqueueCommunity(community, readGrants: () async => [grant]);
-    await outbox.enqueueCommunity(community, readGrants: () async => [grant]);
+        await outbox.enqueueCommunity(
+          community,
+          readGrants: () async => [grant],
+        );
+        await outbox.enqueueCommunity(
+          community,
+          readGrants: () async => [grant],
+        );
 
-    final records = await storage.loadAll();
-    expect(records, hasLength(1));
-    expect(
-      records.single.leaseAddress,
-      '${keys.public}|wss://relay.example|${community.pushLeaseInstallationId}',
+        final records = await storage.loadAll();
+        expect(records, hasLength(1));
+        expect(
+          records.single.leaseAddress,
+          '${keys.public}|wss://relay.example|${community.pushLeaseInstallationId}',
+        );
+        expect(records.single.generation, 6);
+        expect(records.single.expiresAt, grant.expiresAt);
+        expect(records.single.relayUrl, 'https://relay.example/');
+      },
     );
-    expect(records.single.generation, 6);
-    expect(records.single.expiresAt, grant.expiresAt);
-    expect(records.single.relayUrl, 'https://relay.example/');
-  });
+  }
 
   test('legacy community revokes its grant-addressed lease', () async {
     final outbox = _outbox(
@@ -296,13 +308,16 @@ BuzzPushLeaseRevocationRecord _record({
   nextAttemptAt: clock.seconds,
 );
 
-BuzzPushEndpointGrant _grant({required int expiresAt}) => BuzzPushEndpointGrant(
+BuzzPushEndpointGrant _grant({
+  required int expiresAt,
+  String profile = 'buzz-ios-dogfood',
+}) => BuzzPushEndpointGrant(
   relayOrigin: 'wss://relay.example',
   relayPubkey: 'a' * 64,
   installationId: '0' * 32,
   endpointGrant: 'opaque',
   endpointHash: 'b' * 64,
-  appProfile: 'buzz-ios-dogfood',
+  appProfile: profile,
   endpointEpoch: 1,
   generation: 1,
   expiresAt: expiresAt,
