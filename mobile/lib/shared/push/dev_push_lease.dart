@@ -73,6 +73,8 @@ class BuzzPushLeaseDescriptor {
         'icon',
         'self',
         'pairing_relay_url',
+        'admin_api',
+        'read_state_snapshot',
         'push',
       },
       name: 'NIP-11 document',

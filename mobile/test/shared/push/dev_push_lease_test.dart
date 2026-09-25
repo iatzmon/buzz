@@ -45,6 +45,17 @@ void main() {
     },
   );
 
+  test('descriptor accepts relay admin and read-state capabilities', () {
+    final information = _descriptorJson(relay.public);
+    information['admin_api'] = {'enabled': true};
+    information['read_state_snapshot'] = {'supported': true};
+
+    expect(
+      BuzzPushLeaseDescriptor.fromRelayInformation(information).transport,
+      buzzPushTransport,
+    );
+  });
+
   test('publishes strict kind-30350 lease and waits for accepted OK', () async {
     Map<String, dynamic>? submitted;
     final publication = await publishBuzzDevPushLease(

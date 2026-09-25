@@ -34,6 +34,7 @@ class AndroidBuzzPushBootstrap extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     useListenable(androidPushToken);
     final communities = ref.watch(communityListProvider).value ?? const [];
+    final activeCommunityId = ref.watch(activeCommunityProvider).value?.id;
     final cleanup = ref.watch(buzzPushLeaseRevocationOutboxProvider);
     final tick = useState(0);
     final tail = useRef<Future<void>>(Future.value());
@@ -78,7 +79,7 @@ class AndroidBuzzPushBootstrap extends HookConsumerWidget {
           androidPushError.value =
               'Notification cleanup is waiting for connectivity.';
         }
-        var failed = false;
+        var activeCommunityFailed = false;
         for (final community in communities) {
           try {
             if (cancelled) return;
@@ -172,11 +173,13 @@ class AndroidBuzzPushBootstrap extends HookConsumerWidget {
               );
             }
           } on Object {
-            failed = true;
+            if (community.id == activeCommunityId) {
+              activeCommunityFailed = true;
+            }
           }
         }
         if (!cancelled) {
-          androidPushError.value = failed
+          androidPushError.value = activeCommunityFailed
               ? 'Notifications are waiting for relay or push service connectivity.'
               : null;
           await ref
@@ -198,7 +201,7 @@ class AndroidBuzzPushBootstrap extends HookConsumerWidget {
             'Notifications are waiting for relay or push service connectivity.';
       });
       return () => cancelled = true;
-    }, [fingerprint, androidPushToken.value, tick.value]);
+    }, [activeCommunityId, fingerprint, androidPushToken.value, tick.value]);
     return child;
   }
 }
