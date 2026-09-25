@@ -60,6 +60,20 @@ void main() {
     }),
   );
 
+  test('Android preview strips markup and bounds message text', () {
+    expect(
+      androidPushPreviewBody(
+        ' Hello  **team**\n![image](https://example.com/photo) '
+        'https://example.com/private `code` ```secret\nblock```',
+      ),
+      'Hello **team** image [link] code [code]',
+    );
+    expect(androidPushPreviewBody('  \n  '), isEmpty);
+    final longPreview = androidPushPreviewBody('😀' * 200);
+    expect(longPreview.runes.length, 178);
+    expect(longPreview.endsWith('…'), isTrue);
+  });
+
   test('pairs HTTPS relay URLs with HTTPS REST and WSS sockets', () {
     expect(
       canonicalBuzzPushRelayHttpUrl('https://relay.example'),
@@ -550,7 +564,7 @@ void main() {
   );
 
   test(
-    'failed fetch leaves durable retry; verified delivery contains IDs only',
+    'failed fetch leaves durable retry; verified delivery includes preview',
     () async {
       final storage = _MemoryCommunities([community]);
       await expectLater(
@@ -582,6 +596,7 @@ void main() {
           'communityId': community.id,
           'channelId': channel,
           'eventId': valid.id,
+          'preview': 'Private test text',
         },
       ]);
       expect(
@@ -632,6 +647,7 @@ void main() {
           'communityId': community.id,
           'channelId': channel,
           'eventId': valid.id,
+          'preview': 'Private test text',
         },
       ]);
       expect(

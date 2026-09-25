@@ -24,6 +24,27 @@ final _channelId = RegExp(
   r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
 );
 
+/// A bounded snippet from an authenticated, signature-verified relay event.
+/// FCM remains an opaque wake; message text crosses only the local Dart/native
+/// boundary after the current community and read-state checks pass.
+String androidPushPreviewBody(String content) {
+  var body = content
+      .replaceAll(RegExp(r'```[\s\S]*?```'), '[code]')
+      .replaceAllMapped(RegExp(r'`([^`]*)`'), (match) => match[1] ?? '')
+      .replaceAllMapped(
+        RegExp(r'!?\[([^\]]*)\]\([^)]*\)'),
+        (match) => match[1] ?? '',
+      )
+      .replaceAll(RegExp(r'https?://\S+'), '[link]')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  final codePoints = body.runes.toList(growable: false);
+  if (codePoints.length > 180) {
+    body = '${String.fromCharCodes(codePoints.take(177)).trimRight()}…';
+  }
+  return body;
+}
+
 /// Composite cursor for one push policy's historical catch-up.
 ///
 /// A null cursor means that policy has not completed its first page yet. The
@@ -625,6 +646,7 @@ Future<void> deliverAndroidBuzzWake({
                 (tag) => tag.length >= 2 && tag[0] == 'h',
               )[1],
               'eventId': event.id,
+              'preview': androidPushPreviewBody(event.content),
             };
             await (present ??
                 (args) async =>

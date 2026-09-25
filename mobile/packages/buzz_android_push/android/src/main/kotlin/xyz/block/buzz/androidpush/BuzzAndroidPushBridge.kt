@@ -183,7 +183,7 @@ internal class BuzzAndroidPushBridge(
             return
         }
         try {
-            result.success(renderer.render(envelope))
+            result.success(renderer.render(envelope, payload["preview"] as? String))
         } catch (error: BuzzNotificationPersistenceException) {
             result.error("native_error", error.message, null)
         } catch (error: BuzzNotificationDeliveryException) {

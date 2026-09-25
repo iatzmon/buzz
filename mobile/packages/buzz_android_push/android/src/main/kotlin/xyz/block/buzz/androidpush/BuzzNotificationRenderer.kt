@@ -141,7 +141,17 @@ internal class BuzzNotificationPendingStore(
     }
 }
 
-/** Renders generic, privacy-preserving Buzz message notifications. */
+/** Rejects malformed text at the native boundary; a missing snippet stays generic. */
+internal fun buzzNotificationBody(preview: String?): String {
+    val candidate = preview?.trim() ?: return "New message"
+    if (candidate.isEmpty() ||
+        candidate.codePointCount(0, candidate.length) > 180 ||
+        candidate.any { Character.isISOControl(it) || it == '\u2028' || it == '\u2029' }
+    ) return "New message"
+    return candidate
+}
+
+/** Renders bounded Buzz message previews from verified local relay fetches. */
 internal class BuzzNotificationRenderer(
     private val context: Context,
     private val pendingStore: BuzzNotificationPendingStore =
@@ -159,7 +169,7 @@ internal class BuzzNotificationRenderer(
         context.getSharedPreferences(DEDUP_PREFERENCES_NAME, Context.MODE_PRIVATE),
     ),
 ) {
-    fun render(envelope: BuzzNotificationEnvelope): Boolean {
+    fun render(envelope: BuzzNotificationEnvelope, preview: String? = null): Boolean {
         synchronized(BuzzNotificationProcessLock.value) {
             if (restrictionFence.isRestricted() ||
                 envelope.communityId !in snapshotStore.allowedCommunityIds() ||
@@ -198,8 +208,9 @@ internal class BuzzNotificationRenderer(
             }
                 .setSmallIcon(R.drawable.ic_notification_buzz)
                 .setContentTitle("Buzz")
-                .setContentText("New message")
+                .setContentText(buzzNotificationBody(preview))
                 .setCategory(Notification.CATEGORY_MESSAGE)
+                .setVisibility(Notification.VISIBILITY_PRIVATE)
                 .setAutoCancel(true)
                 .setOnlyAlertOnce(true)
                 .setContentIntent(contentIntent)
