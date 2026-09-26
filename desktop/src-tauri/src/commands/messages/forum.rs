@@ -65,6 +65,38 @@ pub(super) fn forum_message_from_event(event: &nostr::Event, channel_id: &str) -
     }
 }
 
+/// Splits a forum posts response into posts and their reply summaries.
+///
+/// The head page comes from the relay's channel window, which adds one
+/// kind:39005 thread summary per post with replies (keyed by its `e` tag) and
+/// one kind:39006 window-bounds event. Only kind:45001 events become posts.
+pub(super) fn split_forum_posts_response(
+    events: Vec<nostr::Event>,
+) -> (
+    Vec<nostr::Event>,
+    std::collections::HashMap<String, ThreadSummary>,
+) {
+    let mut posts = Vec::new();
+    let mut summaries = std::collections::HashMap::new();
+    for event in events {
+        match event.kind.as_u16() as u32 {
+            45001 => posts.push(event),
+            buzz_core_pkg::kind::KIND_THREAD_SUMMARY => {
+                let root = event.tags.iter().find_map(|tag| match tag.as_slice() {
+                    [name, value, ..] if name.as_str() == "e" => Some(value.clone()),
+                    _ => None,
+                });
+                let summary = serde_json::from_str::<ThreadSummary>(&event.content);
+                if let (Some(root), Ok(summary)) = (root, summary) {
+                    summaries.insert(root, summary);
+                }
+            }
+            _ => {}
+        }
+    }
+    (posts, summaries)
+}
+
 pub(super) fn forum_reply_from_event(
     event: &nostr::Event,
     channel_id: &str,
@@ -168,9 +200,16 @@ pub async fn get_forum_posts(
     filter.insert("limit".to_string(), serde_json::json!(cap));
     if let Some(t) = before {
         filter.insert("until".to_string(), serde_json::json!(t));
+    } else {
+        // The relay's channel window adds each post's reply count and last
+        // reply time. Its cursor needs an event id as well as a timestamp,
+        // so older pages keep the plain query without summaries.
+        filter.insert("top_level".to_string(), serde_json::json!(true));
+        filter.insert("include_summaries".to_string(), serde_json::json!(true));
     }
 
-    let events = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+    let response = query_relay(&state, &[serde_json::Value::Object(filter)]).await?;
+    let (events, mut summaries) = split_forum_posts_response(response);
     let ids = events
         .iter()
         .map(|event| event.id.to_hex())
@@ -192,6 +231,9 @@ pub async fn get_forum_posts(
         .map(|ev| {
             let mut message = forum_message_from_event(ev, &channel_id);
             apply_link_preview_suppression(&mut message.tags, &message.event_id, &suppressed);
+            if let Some(summary) = summaries.remove(&message.event_id) {
+                message.thread_summary = Some(summary);
+            }
             message
         })
         .collect();
@@ -282,6 +324,47 @@ mod tests {
             .tags(tags)
             .sign_with_keys(keys)
             .expect("event signs")
+    }
+
+    #[test]
+    fn split_forum_posts_response_attaches_relay_summaries() {
+        let author = Keys::generate();
+        let relay = Keys::generate();
+        let answered = signed_event(&author, 45001, Vec::new());
+        let quiet = signed_event(&author, 45001, vec![vec!["t".into(), "quiet".into()]]);
+        assert_ne!(answered.id, quiet.id);
+        let answered_id = answered.id.to_hex();
+        let bob = Keys::generate().public_key().to_hex();
+        let summary = EventBuilder::new(
+            Kind::Custom(39005),
+            serde_json::json!({
+                "reply_count": 2,
+                "descendant_count": 3,
+                "last_reply_at": 1_790_000_000,
+                "participants": [bob],
+            })
+            .to_string(),
+        )
+        .tags([
+            nostr::Tag::parse(["e", answered_id.as_str()]).expect("e tag"),
+            nostr::Tag::parse(["d", answered_id.as_str()]).expect("d tag"),
+        ])
+        .sign_with_keys(&relay)
+        .expect("summary signs");
+        let bounds = signed_event(&relay, 39006, Vec::new());
+
+        let (posts, summaries) =
+            split_forum_posts_response(vec![answered, summary, quiet.clone(), bounds]);
+
+        assert_eq!(posts.len(), 2);
+        assert!(posts.iter().all(|post| post.kind.as_u16() == 45001));
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[&answered_id];
+        assert_eq!(summary.reply_count, 2);
+        assert_eq!(summary.descendant_count, 3);
+        assert_eq!(summary.last_reply_at, Some(1_790_000_000));
+        assert_eq!(summary.participants, vec![bob]);
+        assert!(!summaries.contains_key(&quiet.id.to_hex()));
     }
 
     #[test]

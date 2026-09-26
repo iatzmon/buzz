@@ -8,16 +8,17 @@ import 'forum_models.dart';
 
 /// Fetches forum posts (kind:45001) for a channel from the relay.
 ///
-/// Posts are top-level events tagged `#h:<channelId>`. Invalidate to refresh
-/// (e.g. after creating a new post).
+/// Posts are top-level events tagged `#h:<channelId>`. The relay's channel
+/// window adds each post's reply count and last reply time. Invalidate to
+/// refresh (e.g. after creating a new post).
 final forumPostsProvider = FutureProvider.family<ForumPostsResponse, String>((
   ref,
   channelId,
 ) async {
   final session = ref.watch(relaySessionProvider.notifier);
-  final events = await session.fetchHistory(
-    NostrFilters.forumPosts(channelId, limit: 50),
-  );
+  final events = await session.queryRelay([
+    NostrFilters.forumPostsWindow(channelId, limit: 50),
+  ]);
   return ForumPostsResponse.fromEvents(events);
 });
 

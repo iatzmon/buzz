@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 
 import '../../shared/relay/relay.dart';
@@ -44,7 +46,10 @@ class ForumPost {
   }
 
   /// Build a [ForumPost] from a raw Nostr event (kind:45001).
-  factory ForumPost.fromEvent(NostrEvent event) {
+  factory ForumPost.fromEvent(
+    NostrEvent event, {
+    ForumThreadSummary? threadSummary,
+  }) {
     return ForumPost(
       eventId: event.id,
       pubkey: event.pubkey,
@@ -53,6 +58,7 @@ class ForumPost {
       createdAt: event.createdAt,
       channelId: event.channelId ?? '',
       tags: event.tags,
+      threadSummary: threadSummary,
     );
   }
 
@@ -179,10 +185,32 @@ class ForumPostsResponse {
     );
   }
 
-  /// Build from a list of kind:45001 events. Posts are sorted newest-first.
+  /// Build from relay events. Posts are sorted newest-first.
+  ///
+  /// Kind:45001 events become posts. A kind:39005 thread summary from the
+  /// relay's channel window becomes the summary of the post its `e` tag names.
+  /// Other events, such as the window-bounds event, are ignored.
   factory ForumPostsResponse.fromEvents(List<NostrEvent> events) {
-    final posts = events.map(ForumPost.fromEvent).toList()
-      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final summaries = <String, ForumThreadSummary>{};
+    for (final event in events) {
+      if (event.kind != EventKind.channelThreadSummary) continue;
+      final rootId = event.getTagValue('e');
+      if (rootId == null) continue;
+      final Object? payload;
+      try {
+        payload = jsonDecode(event.content);
+      } on FormatException {
+        continue; // A bad summary only hides that post's reply count.
+      }
+      if (payload is Map<String, dynamic>) {
+        summaries[rootId] = ForumThreadSummary.fromJson(payload);
+      }
+    }
+    final posts = [
+      for (final event in events)
+        if (event.kind == EventKind.forumPost)
+          ForumPost.fromEvent(event, threadSummary: summaries[event.id]),
+    ]..sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return ForumPostsResponse(posts: posts, nextCursor: null);
   }
 }

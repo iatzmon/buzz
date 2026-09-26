@@ -120,6 +120,7 @@ late SharedPreferences _testPrefs;
 
 Widget _buildThreadPage({
   required ForumThreadResponse threadResponse,
+  Future<ForumThreadResponse> Function()? loadThread,
   String postEventId = 'post1',
   String? currentPubkey = 'self',
   bool isMember = true,
@@ -130,6 +131,8 @@ Widget _buildThreadPage({
   TextScaler textScaler = TextScaler.noScaling,
 }) {
   return ProviderScope(
+    // Failed loads stay failed until the user retries.
+    retry: (_, _) => null,
     overrides: [
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
       knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
@@ -140,7 +143,7 @@ Widget _buildThreadPage({
       forumThreadProvider((
         channelId: _channelId,
         eventId: postEventId,
-      )).overrideWith((ref) async => threadResponse),
+      )).overrideWith((ref) => loadThread?.call() ?? threadResponse),
       savedPrefsProvider.overrideWithValue(_testPrefs),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -581,6 +584,89 @@ void main() {
   });
 
   group('ForumThreadPage', () {
+    ThreadReply reply(String eventId, String content) => ThreadReply(
+      eventId: eventId,
+      pubkey: 'bob',
+      content: content,
+      kind: 45003,
+      createdAt: 2000,
+      channelId: _channelId,
+      tags: const [
+        ['h', _channelId],
+      ],
+      depth: 1,
+    );
+
+    testWidgets('pull down shows a reply published after opening', (
+      tester,
+    ) async {
+      var loads = 0;
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(),
+            replies: const [],
+            totalReplies: 0,
+          ),
+          loadThread: () async {
+            loads++;
+            final replies = loads == 1
+                ? const <ThreadReply>[]
+                : [reply('r1', 'Late reply')];
+            return ForumThreadResponse(
+              post: _makePost(),
+              replies: replies,
+              totalReplies: replies.length,
+            );
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('0 replies'), findsOneWidget);
+
+      await tester.timedDrag(
+        find.byType(ListView),
+        const Offset(0, 320),
+        const Duration(milliseconds: 500),
+      );
+      await tester.pumpAndSettle();
+
+      expect(loads, 2);
+      expect(find.text('1 reply'), findsOneWidget);
+      expect(find.text('Late reply'), findsOneWidget);
+    });
+
+    testWidgets('Retry reloads a thread that failed to load', (tester) async {
+      var loads = 0;
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(),
+            replies: const [],
+            totalReplies: 0,
+          ),
+          loadThread: () async {
+            loads++;
+            if (loads == 1) throw Exception('relay timeout');
+            return ForumThreadResponse(
+              post: _makePost(),
+              replies: [reply('r1', 'Reply after retry')],
+              totalReplies: 1,
+            );
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Failed to load thread'), findsOneWidget);
+
+      await tester.tap(find.text('Retry'));
+      await tester.pumpAndSettle();
+
+      expect(loads, 2);
+      expect(find.text('Failed to load thread'), findsNothing);
+      expect(find.text('Reply after retry'), findsOneWidget);
+    });
+
     AvatarImage avatarIn(WidgetTester tester, Key key) =>
         tester.widget<AvatarImage>(
           find.descendant(

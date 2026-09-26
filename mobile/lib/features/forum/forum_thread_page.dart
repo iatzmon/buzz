@@ -9,6 +9,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
+import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -44,6 +45,21 @@ class ForumThreadPage extends HookConsumerWidget {
     final threadAsync = ref.watch(
       forumThreadProvider((channelId: channelId, eventId: postEventId)),
     );
+
+    // Manual refresh for pull-down and the error state's Retry button.
+    Future<void> refresh() async {
+      final next = ref.refresh(
+        forumThreadProvider((
+          channelId: channelId,
+          eventId: postEventId,
+        )).future,
+      );
+      try {
+        await next;
+      } on Object {
+        // The page's error state shows the failure.
+      }
+    }
 
     // Periodic refresh (every 10s, matching desktop).
     useEffect(() {
@@ -91,11 +107,17 @@ class ForumThreadPage extends HookConsumerWidget {
         error: (e, _) => Padding(
           padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
           child: Center(
-            child: Text(
-              'Failed to load thread',
-              style: context.textTheme.bodyMedium?.copyWith(
-                color: context.colors.error,
-              ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Failed to load thread',
+                  style: context.textTheme.bodyMedium?.copyWith(
+                    color: context.colors.error,
+                  ),
+                ),
+                TextButton(onPressed: refresh, child: const Text('Retry')),
+              ],
             ),
           ),
         ),
@@ -105,6 +127,7 @@ class ForumThreadPage extends HookConsumerWidget {
           currentPubkey: currentPubkey,
           isMember: isMember,
           isArchived: isArchived,
+          onRefresh: refresh,
         ),
       ),
     );
@@ -201,6 +224,7 @@ class _ThreadContent extends HookConsumerWidget {
   final String? currentPubkey;
   final bool isMember;
   final bool isArchived;
+  final Future<void> Function() onRefresh;
 
   const _ThreadContent({
     required this.thread,
@@ -208,6 +232,7 @@ class _ThreadContent extends HookConsumerWidget {
     required this.currentPubkey,
     required this.isMember,
     required this.isArchived,
+    required this.onRefresh,
   });
 
   @override
@@ -243,59 +268,63 @@ class _ThreadContent extends HookConsumerWidget {
     return Column(
       children: [
         Expanded(
-          child: ListView(
-            padding: EdgeInsets.only(
-              top: frostedAppBarHeight(context),
-              bottom: Grid.xs,
-            ),
-            children: [
-              _OriginalPost(post: post),
-
-              Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: Grid.gutter,
-                  vertical: Grid.xxs,
-                ),
-                child: Row(
-                  children: [
-                    Icon(
-                      LucideIcons.messageSquare,
-                      size: 16,
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: Grid.half),
-                    Text(
-                      '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
-                      style: context.textTheme.labelMedium?.copyWith(
-                        color: context.colors.onSurfaceVariant,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
+          child: BeeRefreshIndicator(
+            edgeOffset: frostedAppBarHeight(context),
+            onRefresh: onRefresh,
+            child: ListView(
+              padding: EdgeInsets.only(
+                top: frostedAppBarHeight(context),
+                bottom: Grid.xs,
               ),
+              children: [
+                _OriginalPost(post: post),
 
-              // Reply list
-              if (replies.isEmpty)
                 Padding(
-                  padding: const EdgeInsets.all(Grid.sm),
-                  child: Text(
-                    'No replies yet. Be the first to respond.',
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: context.colors.onSurfaceVariant,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: Grid.gutter,
+                    vertical: Grid.xxs,
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        LucideIcons.messageSquare,
+                        size: 16,
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: Grid.half),
+                      Text(
+                        '${replies.length} ${replies.length == 1 ? 'reply' : 'replies'}',
+                        style: context.textTheme.labelMedium?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
+                // Reply list
+                if (replies.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(Grid.sm),
+                    child: Text(
+                      'No replies yet. Be the first to respond.',
+                      style: context.textTheme.bodyMedium?.copyWith(
+                        color: context.colors.onSurfaceVariant,
+                      ),
+                      textAlign: TextAlign.center,
                     ),
-                    textAlign: TextAlign.center,
-                  ),
-                )
-              else
-                for (final reply in replies)
-                  _ReplyRow(
-                    reply: reply,
-                    currentPubkey: currentPubkey,
-                    channelId: channelId,
-                    rootEventId: post.eventId,
-                  ),
-            ],
+                  )
+                else
+                  for (final reply in replies)
+                    _ReplyRow(
+                      reply: reply,
+                      currentPubkey: currentPubkey,
+                      channelId: channelId,
+                      rootEventId: post.eventId,
+                    ),
+              ],
+            ),
           ),
         ),
 
