@@ -122,6 +122,21 @@ abstract final class NostrFilters {
     until: until,
   );
 
+  /// Newest forum posts in a channel with the relay's reply summaries.
+  ///
+  /// A relay bridge channel-window request (`/query` only): the response holds
+  /// the kind:45001 rows, one kind:39005 thread summary per post that has
+  /// replies, and one kind:39006 window-bounds event.
+  static NostrFilter forumPostsWindow(String channelId, {int limit = 50}) =>
+      NostrFilter(
+        kinds: [45001],
+        tags: {
+          '#h': [channelId],
+        },
+        limit: limit,
+        extensions: const {'top_level': true, 'include_summaries': true},
+      );
+
   /// Replies in a forum thread (root event id + channel scope).
   static NostrFilter forumThread(String rootId, String channelId) =>
       NostrFilter(

@@ -1,5 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'dart:convert';
+
 import 'package:buzz/features/forum/forum_models.dart';
+import 'package:buzz/shared/relay/relay.dart';
 
 Map<String, dynamic> _postJson({
   String eventId = 'evt1',
@@ -252,6 +255,54 @@ void main() {
       final result = formatRelativeTime(ts);
       // Should be M/D/YYYY format.
       expect(result, matches(RegExp(r'^\d{1,2}/\d{1,2}/\d{4}$')));
+    });
+  });
+
+  group('ForumPostsResponse.fromEvents', () {
+    NostrEvent event({
+      required String id,
+      required int kind,
+      int createdAt = 1000,
+      List<List<String>> tags = const [],
+      String content = '',
+    }) => NostrEvent(
+      id: id,
+      pubkey: kind == 45001 ? 'alice' : 'relay',
+      createdAt: createdAt,
+      kind: kind,
+      tags: tags,
+      content: content,
+      sig: '',
+    );
+
+    test('attaches relay thread summaries to their posts', () {
+      final response = ForumPostsResponse.fromEvents([
+        event(id: 'p1', kind: 45001, createdAt: 1000),
+        event(
+          id: 's1',
+          kind: 39005,
+          tags: const [
+            ['e', 'p1'],
+            ['d', 'p1'],
+          ],
+          content: jsonEncode({
+            'reply_count': 2,
+            'descendant_count': 3,
+            'last_reply_at': 3000,
+            'participants': ['bob', 'carol'],
+          }),
+        ),
+        event(id: 'p2', kind: 45001, createdAt: 1500),
+        event(id: 'bounds', kind: 39006, content: '{"has_more":false}'),
+      ]);
+
+      expect(response.posts.map((p) => p.eventId), ['p2', 'p1']);
+      expect(response.posts[0].threadSummary, isNull);
+      final summary = response.posts[1].threadSummary!;
+      expect(summary.replyCount, 2);
+      expect(summary.descendantCount, 3);
+      expect(summary.lastReplyAt, 3000);
+      expect(summary.participants, ['bob', 'carol']);
     });
   });
 }
